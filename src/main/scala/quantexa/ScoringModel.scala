@@ -1,85 +1,76 @@
 package quantexa
 
-import org.apache.spark.sql.{Dataset, SparkSession}
-import org.apache.spark.SparkConf
 import org.apache.log4j.{Level, Logger}
+import org.apache.spark.sql.SparkSession
 
-// Define case classes
-//case class AccountData(
-//                        customerId: String,
-//                        accountId: String,
-//                        balance: Option[Long]
-//                      )
 
-//case class AddressData(
-//                        addressId: String,
-//                        customerId: String,
-//                        address: String,
-//                        number: Option[Int],
-//                        road: Option[String],
-//                        city: Option[String],
-//                        country: Option[String]
-//                      )
+/***
+ * Part of the Quantexa solution is to flag high risk countries as a link to these countries may be an indication of
+ * tax evasion.
+ *
+ * For this question you are required to populate the flag in the ScoringModel case class where the customer has an
+ * address in the British Virgin Islands.
+ *
+ * This flag must be then used to return the number of customers in the dataset that have a link to a British Virgin
+ * Islands address.
+ */
 
-//case class CustomerDocument(
-//                             customerId: String,
-//                             forename: String,
-//                             surname: String,
-//                             accounts: Option[Seq[AccountData]],
-//                             numberAccounts: Option[Int],
-//                             totalBalance: Option[Long],
-//                             averageBalance: Option[Double],
-//                             address: Seq[AddressData]
-//                           )
+object ScoringModel extends App {
 
-case class ScoringModel(
-                         customerId: String,
-                         forename: String,
-                         surname: String,
-                         accounts: Option[Seq[AccountData]],
-                         numberAccounts: Option[Int],
-                         totalBalance: Option[Long],
-                         averageBalance: Option[Double],
-                         address: Seq[AddressData],
-                         linkToBVI: Boolean
-                       )
 
-object ScoringModelAssessment {
-  def main(args: Array[String]): Unit = {
-    val conf = new SparkConf().setAppName("quantexaAssessment3").setMaster("local[*]").set("spark.driver.host", "localhost")
-    val spark = SparkSession.builder().config(conf).getOrCreate()
+  //Create a spark context, using a local master so Spark runs on the local machine
+  val spark = SparkSession.builder().master("local[*]").appName("ScoringModel").getOrCreate()
 
-    import spark.implicits._
-    Logger.getRootLogger.setLevel(Level.WARN)
+  //importing spark implicits allows functions such as dataframe.as[T]
 
-    val outputPath = "file:///Users/niranjankashyap/Downloads/SparkTestProjectWithoutAnswers/"
-    // Load the CustomerDocument Dataset from Assessment 2
-    val customerDocumentDS = spark.read.option("header", "true").parquet(outputPath + "assessment2.parquet").as[CustomerDocument]
+  import spark.implicits._
 
-    // Define BVI country check
-    def hasBVIAddress(addresses: Seq[AddressData]): Boolean = {
-      addresses.exists(_.country.contains("British Virgin Islands"))
-    }
+  //Set logger level to Warn
+  Logger.getRootLogger.setLevel(Level.WARN)
 
-    // Map the CustomerDocument to ScoringModel, setting the linkToBVI flag
-    val scoringModelDS: Dataset[ScoringModel] = customerDocumentDS.map { customer =>
+  case class CustomerDocument(
+                               customerId: String,
+                               forename: String,
+                               surname: String,
+                               //Accounts for this customer
+                               accounts: Seq[AccountData],
+                               //Addresses for this customer
+                               address: Seq[AddressData]
+                             )
+
+  case class ScoringModel(
+                           customerId: String,
+                           forename: String,
+                           surname: String,
+                           //Accounts for this customer
+                           accounts: Seq[AccountData],
+                           //Addresses for this customer
+                           address: Seq[AddressData],
+                           linkToBVI: Boolean
+                         )
+
+
+  //END GIVEN CODE
+
+  val outputPath = "file:///Users/niranjankashyap/Downloads/SparkTestProjectWithoutAnswers/"
+
+  val customerDocumentDS = spark.read.parquet(outputPath + "assessment2.parquet").as[CustomerDocument]
+
+  val scoringModelDS = customerDocumentDS.map {
+    customer =>
       ScoringModel(
-        customer.customerId,
-        customer.forename,
-        customer.surname,
-        customer.accounts,
-        customer.numberAccounts,
-        customer.totalBalance,
-        customer.averageBalance,
-        customer.address,
-        linkToBVI = hasBVIAddress(customer.address)
+        customerId = customer.customerId,
+        forename = customer.forename,
+        surname = customer.surname,
+        accounts = customer.accounts,
+        address = customer.address,
+        linkToBVI = customer.address.map(_.country).contains(Option("British Virgin Islands"))
       )
-    }
-
-    scoringModelDS.show(false)
-
-    // Count the number of customers linked to BVI
-    val bviCount = scoringModelDS.filter(_.linkToBVI).count()
-    println(s"Number of customers linked to BVI: $bviCount")
   }
+
+  val filteredDS = scoringModelDS.filter {
+    score => score.linkToBVI
+  }
+  println(filteredDS.count)
+
 }

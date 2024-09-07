@@ -1,19 +1,51 @@
 package quantexa
 
-import org.apache.spark.sql.{Dataset, SparkSession}
-import org.apache.spark.SparkConf
 import org.apache.log4j.{Level, Logger}
+import org.apache.spark.sql.{DataFrame, SparkSession}
+import quantexa.{AccountData, CustomerAccountOutput}
 
-//case class CustomerAccountOutput(
-//                                  customerId: String,
-//                                  forename: String,
-//                                  surname: String,
-//                                  accounts: Option[Seq[AccountData]],
-//                                  numberAccounts: Option[Int],
-//                                  totalBalance: Option[Long],
-//                                  averageBalance: Option[Double]
-//                                )
+/***
+ * A problem we have at Quantexa is where an address is populated with one string of text. In order to use this information
+ * in the Quantexa product, this field must be "parsed".
+ *
+ * The purpose of parsing is to extract information from an entry - for example, to extract a forename and surname from
+ * a 'full_name' field. We will normally place the extracted fields in a case class which will sit as an entry in the
+ * wider case class; parsing will populate this entry.
+ *
+ * The parser on an address might yield the following "before" and "after":
+ *
+ * +-----------------------------------------+-------+--------------------+-------+--------+
+ * |Address                                  |number |road                |city   |country |
+ * +-----------------------------------------+-------+--------------------+-------+--------+
+ * |109 Borough High Street, London, England |null   |null                |null   |null    |
+ * +-----------------------------------------+-------+--------------------+-------+--------+
+ *
+ * +-----------------------------------------+-------+--------------------+-------+--------+
+ * |Address                                  |number |road                |city   |country |
+ * +-----------------------------------------+-------+--------------------+-------+--------+
+ * |109 Borough High Street, London, England |109    |Borough High Street |London |England |
+ * +-----------------------------------------+-------+--------------------+-------+--------+
+ *
+ *
+ * You have been given addressData. This has been read into a DataFrame for you and then converted into a
+ * Dataset of the given raw case class.
+ *
+ * You have been provided with a basic address parser which must be applied to the CustomerDocument model.
+ *
 
+ * Example Answer Format:
+ *
+ * val customerDocument: Dataset[CustomerDocument] = ???
+ * customerDocument.show(1000,truncate = false)
+ *
+ * +----------+-----------+-------+--------------------------------------------------------------------+--------------------------------------------------------------------------------------------------------------------------------------+
+ * |customerId|forename   |surname|accounts                                                            |address                                                                                                                               |
+ * +----------+-----------+-------+--------------------------------------------------------------------+--------------------------------------------------------------------------------------------------------------------------------------+
+ * |IND0001   |Christopher|Black  |[]                                                                  |[[ADR360,IND0001,762, East 14th Street, New York, United States of America,762, East 14th Street, New York, United States of America]]|
+ * |IND0002   |Madeleine  |Kerr   |[[IND0002,ACC0155,323], [IND0002,ACC0262,60]]                       |[[ADR139,IND0002,675, Khao San Road, Bangkok, Thailand,675, Khao San Road, Bangkok, Thailand]]                                        |
+ * |IND0003   |Sarah      |Skinner|[[IND0003,ACC0235,631], [IND0003,ACC0486,400], [IND0003,ACC0540,53]]|[[ADR318,IND0003,973, Blue Jays Way, Toronto, Canada,973, Blue Jays Way, Toronto, Canada]]                                            |
+ * | ...
+ */
 case class AddressRawData(
                            addressId: String,
                            customerId: String,
@@ -30,84 +62,103 @@ case class AddressData(
                         country: Option[String]
                       )
 
+//Expected Output Format
 case class CustomerDocument(
                              customerId: String,
                              forename: String,
                              surname: String,
-                             accounts: Option[Seq[AccountData]],
-                             numberAccounts: Option[Int],
-                             totalBalance: Option[Long],
-                             averageBalance: Option[Double],
+                             //Accounts for this customer
+                             accounts: Seq[AccountData],
+                             //Addresses for this customer
                              address: Seq[AddressData]
                            )
 
-object CustomerAddress {
-  def main(args: Array[String]): Unit = {
-    val conf = new SparkConf().setAppName("quantexaAssessment2").setMaster("local[*]").set("spark.driver.host", "localhost")
-    val spark = SparkSession.builder().config(conf).getOrCreate()
+object CustomerAddress extends App {
 
-    import spark.implicits._
-    Logger.getRootLogger.setLevel(Level.WARN)
+  //Create a spark context, using a local master so Spark runs on the local machine
+  val spark = SparkSession.builder().master("local[*]").appName("CustomerAddress").getOrCreate()
 
-    val inputPath = "file:///Users/niranjankashyap/Downloads/SparkTestProjectWithoutAnswers/SparkTestProject"
-    val outputPath = "file:///Users/niranjankashyap/Downloads/SparkTestProjectWithoutAnswers/"
+  //importing spark implicits allows functions such as dataframe.as[T]
 
-    // Load data from CSV files into Dataset
-    val customerAccountOutputDS = spark.read.parquet(outputPath + "assessment1.parquet").as[CustomerAccountOutput]
-    val addressRawDS = spark.read.option("header", "true").csv(inputPath + "/src/main/resources/address_data.csv").as[AddressRawData]
+  import spark.implicits._
 
-    customerAccountOutputDS.show(false)
-    addressRawDS.show(false)
+  //Set logger level to Warn
+  Logger.getRootLogger.setLevel(Level.WARN)
+  def addressParser(unparsedAddress: Seq[AddressData]): Seq[AddressData] = {
+    unparsedAddress.map(address => {
+      val split = address.address.split(", ")
 
-    // Define the address parser
-    def addressParser(unparsedAddress: Seq[AddressRawData]): Seq[AddressData] = {
-      unparsedAddress.map { address =>
-        val parts = address.address.split(", ").toList
-
-        val number = parts.headOption.flatMap(p => scala.util.Try(p.toInt).toOption)
-        val road = parts.lift(1)
-        val city = parts.lift(2)
-        val country = parts.lift(3)
-
-        AddressData(
-          address.addressId,
-          address.customerId,
-          address.address,
-          number,
-          road,
-          city,
-          country
-        )
-      }
+      address.copy(
+        number = Some(split(0).toInt),
+        road = Some(split(1)),
+        city = Some(split(2)),
+        country = Some(split(3))
+      )
     }
-
-    // Parse addresses and join with customer data
-    val parsedAddressDS = addressRawDS.groupByKey(_.customerId)
-      .mapGroups { case (customerId, addresses) =>
-        (customerId, addressParser(addresses.toSeq))
-      }.toDF("customerId", "address")
-
-    val customerDocumentDS: Dataset[CustomerDocument] = customerAccountOutputDS
-      .join(parsedAddressDS, Seq("customerId"), "left_outer")
-      .as[(String, String, String, Option[Seq[AccountData]], Option[Int], Option[Long], Option[Double], Seq[AddressData])]
-      .map {
-        case (customerId, forename, surname, accounts, numberAccounts, totalBalance, averageBalance, address) =>
-          CustomerDocument(
-            customerId,
-            forename,
-            surname,
-            accounts,
-            numberAccounts,
-            totalBalance,
-            averageBalance,
-            address
-          )
-      }
-
-    customerDocumentDS.show(false)
-    customerDocumentDS.printSchema()
-
-    customerDocumentDS.write.mode("overwrite").parquet(outputPath + "assessment2.parquet")
-
+    )
   }
+
+  val inputPath = "file:///Users/niranjankashyap/Downloads/SparkTestProjectWithoutAnswers/SparkTestProject"
+  val outputPath = "file:///Users/niranjankashyap/Downloads/SparkTestProjectWithoutAnswers/"
+
+  val addressDF: DataFrame = spark.read.option("header", "true").csv(inputPath + "/src/main/resources/address_data.csv")
+
+  val customerAccountDS = spark.read.parquet(outputPath + "assessment1.parquet").as[CustomerAccountOutput]
+
+  //END GIVEN CODE
+
+  val addressDS = addressDF.as[AddressRawData]
+
+  val addressDataDS = addressDS.map {
+    address =>
+      AddressData(
+        addressId = address.addressId,
+        customerId = address.customerId,
+        address = address.address,
+        number = None,
+        road = None,
+        city = None,
+        country = None
+      )
+  }
+
+  val customerDocumentDS = customerAccountDS.map {
+    customer =>
+      CustomerDocument(
+        customerId = customer.customerId,
+        forename = customer.forename,
+        surname = customer.surname,
+        //Accounts for this customer
+        accounts =  customer.accounts,
+        //Addresses for this customer
+        address =  Seq.empty
+      )
+  }
+
+  val groupedAddressDS = addressDataDS.groupByKey(_.customerId)
+
+  val addressDataMappedDS = groupedAddressDS.mapGroups {
+    (customerId, addressDataIter) =>
+      val seqOfAddressData = addressDataIter.toSeq
+      val seqOfAddressDataParsed = addressParser(seqOfAddressData)
+      (customerId, seqOfAddressDataParsed)
+  }
+
+  val customerAddressDataDS = customerDocumentDS.joinWith(
+    addressDataMappedDS,
+    customerDocumentDS("customerId") === addressDataMappedDS("_1"),
+    "left"
+  )
+
+  val customerDocumentOutputDS = customerAddressDataDS.map {
+    case (customer, null) =>
+      customer
+    case (customer, addressData) =>
+      customer.copy(
+        address = addressData._2
+      )
+  }
+
+  customerDocumentOutputDS.show(false)
+  customerDocumentOutputDS.write.mode("overwrite").parquet(outputPath + "assessment2.parquet")
 }
